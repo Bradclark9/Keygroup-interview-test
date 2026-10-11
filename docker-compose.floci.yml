@@ -1,0 +1,26 @@
+# floci-gcp emulator. Started by `make floci-up`.
+# The docker socket lets floci-gcp run each emulated GKE cluster as a k3s container.
+
+services:
+  floci-gcp:
+    image: floci/floci-gcp:latest
+    container_name: keygroup-floci-gcp
+    ports:
+      - "4588:4588"
+    volumes:
+      - floci-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: ["/app/application"]
+    command: ["--persist", "/data"]
+    environment:
+      - FLOCI_GCP_HOSTNAME=floci-gcp
+      - FLOCI_GCP_BASE_URL=http://floci-gcp:4588
+      - FLOCI_GCP_STORAGE_MODE=hybrid
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/4588' && echo 'ok' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  floci-data:

@@ -1,0 +1,62 @@
+name: CI
+
+# Lint + unit tests, then the full `make floci-up` (terraform + helm against
+# the floci-gcp emulator) on the runner. No GCP account or secrets needed.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    name: Lint & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Terraform + Helm lint
+        run: make lint
+
+      - name: Unit tests
+        working-directory: app
+        run: |
+          pip install -r requirements-dev.txt
+          python -m pytest -q
+
+  floci:
+    name: Deploy to floci-gcp
+    needs: lint-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: make floci-up
+        run: make floci-up
+
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          make k8s-status || true
+          KUBECONFIG=.floci/kubeconfig kubectl -n keygroup describe pods || true
+          docker logs keygroup-floci-gcp --tail 200 || true
+
+      - name: Tear down
+        if: always()
+        run: make floci-down

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: keygroup-api
+description: Keygroup file API + nginx on the floci-gcp GKE cluster
+type: application
+version: 0.2.0
+appVersion: "0.1.0"

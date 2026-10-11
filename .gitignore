@@ -1,0 +1,45 @@
+# Local .terraform directories
+**/.terraform/*
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# Crash log files
+crash.log
+crash.*.log
+
+# Keep committed env var-files; ignore local overrides
+*.auto.tfvars
+*.auto.tfvars.json
+secrets.tfvars
+
+# Ignore override files
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Ignore CLI configuration files
+.terraformrc
+terraform.rc
+
+# Lock file is committed; plan artifacts are not
+*.tfplan
+tfplan
+plan-*.txt
+
+# Python
+app/.venv/
+app/**/__pycache__/
+app/.pytest_cache/
+*.pyc
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+
+# floci-gcp generated files
+.floci/

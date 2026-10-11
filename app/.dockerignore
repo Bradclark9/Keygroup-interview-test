@@ -1,0 +1,10 @@
+k8s/
+tests/
+sample-data/
+.venv/
+__pycache__/
+*.pyc
+*.md
+.git
+.pytest_cache/
+.env

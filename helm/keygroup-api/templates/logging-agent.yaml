@@ -1,0 +1,139 @@
+# Logging agent: stands in for GKE's built-in one. Vector reads every container's
+# stdout/stderr in this namespace from the node and writes it to Cloud Logging on
+# floci-gcp in GKE's shape: logs/stdout|stderr, resource k8s_container, JSON lines
+# parsed into jsonPayload with "severity" promoted to the entry severity.
+{{- define "logging-agent.vector-config" }}
+data_dir: /var/lib/vector
+
+sources:
+  pods:
+    type: kubernetes_logs
+    glob_minimum_cooldown_ms: 2000 # look for new pods' log files every 2s (default 60s)
+    extra_namespace_label_selector: kubernetes.io/metadata.name={{ .Release.Namespace }}
+
+transforms:
+  to_log_entry:
+    type: remap
+    inputs: [pods]
+    source: |
+      entry = {
+        "timestamp": .timestamp,
+        "logName": "projects/{{ .Values.gcp.project }}/logs/" + string!(.stream),
+        "severity": "DEFAULT",
+        "resource": {
+          "type": "k8s_container",
+          "labels": {
+            "project_id": "{{ .Values.gcp.project }}",
+            "location": "{{ .Values.gcp.location }}",
+            "cluster_name": "{{ .Values.gcp.cluster }}",
+            "namespace_name": .kubernetes.pod_namespace,
+            "pod_name": .kubernetes.pod_name,
+            "container_name": .kubernetes.container_name
+          }
+        }
+      }
+      payload, err = parse_json(.message)
+      if err == null && is_object(payload) {
+        entry.severity = del(payload.severity) || "DEFAULT"
+        entry.jsonPayload = payload
+      } else {
+        entry.textPayload = .message
+      }
+      . = entry
+
+sinks:
+  # Cloud Logging entries:write. Vector's own Cloud Logging sink only talks to
+  # logging.googleapis.com, so the HTTP sink sends the same request to floci-gcp.
+  cloud_logging:
+    type: http
+    inputs: [to_log_entry]
+    uri: http://floci-gcp:4588/v2/entries:write
+    encoding:
+      codec: json
+    payload_prefix: '{"entries":'
+    payload_suffix: '}'
+    batch:
+      timeout_secs: 1
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logging-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-logging-agent
+rules:
+  - apiGroups: [""]
+    resources: [pods, namespaces, nodes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-logging-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-logging-agent
+subjects:
+  - kind: ServiceAccount
+    name: logging-agent
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logging-agent
+data:
+  vector.yaml: |
+    {{- include "logging-agent.vector-config" . | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: logging-agent
+spec:
+  selector:
+    matchLabels:
+      app: logging-agent
+  template:
+    metadata:
+      labels:
+        app: logging-agent
+        vector.dev/exclude: "true" # don't ship the agent's own logs
+      annotations:
+        checksum/config: {{ include "logging-agent.vector-config" . | sha256sum }}
+    spec:
+      serviceAccountName: logging-agent
+      hostAliases:
+        - ip: {{ required "flociIP is required" .Values.flociIP | quote }}
+          hostnames: [floci-gcp]
+      containers:
+        - name: vector
+          image: {{ .Values.images.vector }}
+          args: [--config, /etc/vector/vector.yaml]
+          env:
+            - name: VECTOR_SELF_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - { name: config, mountPath: /etc/vector, readOnly: true }
+            - { name: var-log, mountPath: /var/log, readOnly: true }
+            - { name: data, mountPath: /var/lib/vector }
+          resources:
+            requests: { cpu: 20m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+      volumes:
+        - name: config
+          configMap:
+            name: logging-agent
+        - name: var-log
+          hostPath:
+            path: /var/log
+        - name: data
+          hostPath:
+            path: /var/lib/vector
+            type: DirectoryOrCreate
