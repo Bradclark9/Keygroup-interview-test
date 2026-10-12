@@ -1,0 +1,62 @@
+NEXT STEPS: what I'd add next, and the tools I'd use
+=====================================================
+
+1. AUTH  (missing today; the brief asks for it)
+   - Service-to-service callers send a Google-signed ID token; the API verifies it with the
+     google-auth library as a FastAPI dependency (issuer, audience, expiry).
+   - Customer-facing callers: JWTs from Identity Platform (or Auth0/Okta), same verification.
+   - Authorisation: a caller may only read their own users/{id}/... files (user id from the token).
+   - Edge: Cloud Armor rate limiting + WAF on the load balancer; optionally IAP or API Gateway
+     in front if callers are internal staff.
+   - Any API keys or secrets live in Secret Manager, read via Workload Identity
+     (External Secrets Operator or the Secret Manager CSI driver), never in the repo.
+
+2. LATENCY SLO  (99.99% within 300ms)
+   Status: both SLOs pass (99.992% within 300ms) thanks to the per-pod 30s cache. Margin is
+   thin: the remaining slow requests are cache misses that hit floci's ~1s storage stalls.
+   Done: 2 replicas, no CPU limit, sync handler, one storage call per request, TTL cache.
+   - Load test realism: spread requests over many files (k6) so results include cache misses.
+   - Timeouts + one fast retry on storage reads, to cut the tail on cache misses.
+   - Shared cache: Memorystore (Redis) behind the per-pod cache for 6,000+ req/s.
+   - Scale: HorizontalPodAutoscaler on CPU + requests/s (Prometheus Adapter / Managed
+     Prometheus), PodDisruptionBudget, topology spread across zones.
+   - Large files: return signed URLs so downloads go straight from Cloud Storage.
+   - Grafana: add a cache hit-ratio panel (file_cache_lookups_total is already exported).
+
+3. TESTS  (add each as a make target + a step in .github/workflows/ci.yml)
+   - Integration: pytest against the real GCS code path on floci (or Testcontainers).
+   - Terraform: terraform test, tflint, Checkov or Trivy config scan.
+   - Helm: helm-unittest; kubeconform to validate rendered manifests.
+   - Load: fortio today; k6 for scripted, multi-file scenarios.
+   - Images: Trivy vulnerability scan before deploy.
+
+4. SECURITY HARDENING
+   - NetworkPolicies (GKE Dataplane V2): ingress only from the load balancer, egress only to
+     Google APIs.
+   - GKE control plane: private endpoint or master authorized networks (currently open).
+   - Supply chain: sign images with cosign, enforce with Binary Authorization.
+   - Pod Security Admission "restricted" on the namespace; CMEK (Cloud KMS) on the bucket.
+   - Grafana: real login (Google SSO) instead of anonymous admin.
+
+5. OBSERVABILITY
+   - Tracing: OpenTelemetry SDK -> Cloud Trace (Tempo locally).
+   - Alerting: multi-window SLO burn-rate alerts (Cloud Monitoring SLOs or Prometheus
+     Alertmanager) -> on-call.
+   - Logs: Cloud Logging picks up the JSON stdout on GKE; Loki if needed locally.
+
+6. ARCHITECTURE  (in the production diagram, not built yet)
+   - Cloud SQL (HA) for file metadata and ownership.
+   - Pub/Sub on bucket uploads -> worker Deployment for malware scan / metadata,
+     scaled on queue depth with KEDA.
+   - Cloud CDN for cacheable public assets.
+
+7. DELIVERY
+   - Real GCP prod: GCS state bucket, clear emulator_endpoint, Workload Identity Federation for
+     GitHub Actions (no service-account keys), terraform plan on PRs, apply on merge.
+   - Push images to Artifact Registry; deploy with Argo CD (GitOps) or Cloud Deploy.
+   - Pin the k3s image floci creates clusters with (currently its default rancher/k3s:latest).
+   - Semantic release: Conventional Commits (feat:, fix:, feat!:) enforced on PRs with
+     commitlint; on merge to main, semantic-release (or release-please / python-semantic-release)
+     bumps the version, tags vX.Y.Z, writes CHANGELOG.md and creates a GitHub Release.
+     That version tags the Docker image (keygroup-api:1.4.0) and the Helm chart/appVersion,
+     replacing today's timestamp tags, so every deploy is traceable and easy to roll back.

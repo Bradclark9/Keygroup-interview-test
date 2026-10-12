@@ -1,7 +1,13 @@
 name: CI
 
-# Lint + unit tests, then the full `make floci-up` (terraform + helm against
-# the floci-gcp emulator) on the runner. No GCP account or secrets needed.
+# Staged pipeline for the single prod environment (on the floci-gcp emulator, so no
+# GCP account or secrets are needed). Every stage is one `make` target.
+#
+#   lint ─┐
+#         ├─▶ deploy prod ─▶ smoke test ─▶ integration tests ─▶ load test ─▶ SLO gate ─▶ tear down
+#   unit ─┘
+#
+# To add a test stage: add a make target, then a step in the "Test stages" block below.
 
 on:
   pull_request:
@@ -13,42 +19,63 @@ permissions:
   contents: read
 
 jobs:
-  lint-test:
-    name: Lint & unit tests
+  # ── Stage 1: static checks and unit tests (parallel, no cluster) ─────────────
+  lint:
+    name: Lint (terraform + helm)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
+      - run: make lint
 
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: pip install -r app/requirements-dev.txt
+      - run: make test PYTHON=python
 
-      - name: Terraform + Helm lint
-        run: make lint
-
-      - name: Unit tests
-        working-directory: app
-        run: |
-          pip install -r requirements-dev.txt
-          python -m pytest -q
-
-  floci:
-    name: Deploy to floci-gcp
-    needs: lint-test
+  # ── Stage 2: deploy prod, then test it ────────────────────────────────────────
+  deploy-and-test:
+    name: Deploy prod + test
+    needs: [lint, unit-tests]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_wrapper: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r app/requirements-dev.txt
 
-      - name: make floci-up
-        run: make floci-up
+      - name: Deploy prod (terraform + helm on floci)
+        run: make up
+
+      # ── Test stages ─────────────────────────────────────────────────────────
+      - name: Smoke test
+        run: make smoke-test
+
+      - name: Integration tests (app + real GCS client against floci)
+        run: make integration-test PYTHON=python
+
+      - name: Load test (12,000 requests)
+        run: make load-test
+
+      - name: SLO gate (99.99% success, 99.99% within 300ms)
+        run: make slo-check
+
+      # Add more test stages here, e.g.:
+      # - name: Image vulnerability scan
+      #   run: make image-scan
+      # ────────────────────────────────────────────────────────────────────────
 
       - name: Cluster state on failure
         if: failure()
@@ -59,4 +86,4 @@ jobs:
 
       - name: Tear down
         if: always()
-        run: make floci-down
+        run: make down

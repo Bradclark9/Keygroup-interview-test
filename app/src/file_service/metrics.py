@@ -23,6 +23,13 @@ LATENCY = Histogram(
 )
 
 
+CACHE_LOOKUPS = Counter(
+    "file_cache_lookups_total",
+    "Per-pod file cache lookups",
+    ["result"],  # hit | miss
+)
+
+
 def observe(method: str, route: str, status: int, seconds: float) -> None:
     REQUESTS.labels(method, route, str(status)).inc()
     LATENCY.labels(method, route).observe(seconds)

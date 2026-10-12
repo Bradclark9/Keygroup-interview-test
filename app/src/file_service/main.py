@@ -7,7 +7,7 @@ from fastapi.responses import PlainTextResponse
 
 from file_service import __version__, metrics, request_log
 from file_service.config import Settings, get_settings
-from file_service.storage import FileNotFound, build_storage
+from file_service.storage import FileNotFound, Storage
 from file_service.validation import validate_id
 
 app = FastAPI(title="File Retrieval Service", version=__version__)
@@ -18,7 +18,7 @@ _storage = None
 def _init_storage(settings: Settings):
     global _storage
     if _storage is None:
-        _storage = build_storage(settings.local_storage_path, settings.gcs_bucket)
+        _storage = Storage(settings.local_storage_path, settings.gcs_bucket, settings.cache_ttl_seconds)
     return _storage
 
 
@@ -54,8 +54,10 @@ async def prometheus_metrics() -> Response:
     return Response(content=body, media_type=content_type)
 
 
+# Plain `def`: storage calls block, so FastAPI runs this in its threadpool instead of
+# on the event loop, where one slow GCS read would stall every other request.
 @app.get("/v1/users/{user_id}/files/{file_id}")
-async def get_user_file(user_id: str, file_id: str) -> Response:
+def get_user_file(user_id: str, file_id: str) -> Response:
     settings = get_settings()
     storage = _init_storage(settings)
     user_id = validate_id(user_id, "user_id")

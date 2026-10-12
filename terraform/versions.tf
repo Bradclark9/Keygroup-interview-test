@@ -8,9 +8,9 @@ terraform {
     }
   }
 
-  # State lives in the floci-gcp emulator's own GCS (bucket created by `make floci-start`)
+  # State lives in the floci-gcp emulator's own GCS (bucket created by `make emulator`)
   backend "gcs" {
-    bucket                  = "floci-tfstate"
+    bucket                  = "keygroup-prod-tfstate"
     prefix                  = "gke"
     storage_custom_endpoint = "http://localhost:4588/storage/v1/"
     access_token            = "floci"

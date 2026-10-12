@@ -12,7 +12,6 @@ variable "services" {
     "iam.googleapis.com",
     "cloudresourcemanager.googleapis.com",
     "artifactregistry.googleapis.com",
-    "servicenetworking.googleapis.com",
     "storage.googleapis.com",
   ]
 }

@@ -64,7 +64,7 @@ spec:
             - { name: config, mountPath: /var/lib/grafana/dashboards/slo.json, subPath: slo.json }
           resources:
             requests: { cpu: 50m, memory: 128Mi }
-            limits: { cpu: 500m, memory: 512Mi }
+            limits: { cpu: 500m, memory: 1Gi } # startup indexing spikes past 512Mi
       volumes:
         - name: config
           configMap:

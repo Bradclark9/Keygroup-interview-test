@@ -1,231 +1,79 @@
-# Keygroup — File Retrieval Platform
+# Keygroup: customer file retrieval service
 
-Platform Engineer assessment: Terraform (GCP/GKE) + Python microservice retrieving user files from GCS.
+A Python (FastAPI) service that returns customer files from Google Cloud Storage, running on GKE that's provisioned with Terraform. Everything runs locally on **[floci-gcp](https://floci.io)**, a GCP emulator, so no Google Cloud account is needed.
 
-## Architecture
+**Architecture diagram:** [docs/architecture.drawio](docs/architecture.drawio) (open it at [app.diagrams.net](https://app.diagrams.net)). Page 1 is the production design, and page 2 is what runs locally.
 
-```mermaid
-flowchart LR
-  Client([Internal APIs]) -->|HTTPS| LB[Cloud Load Balancing]
-  LB --> SVC[GKE Service]
-  SVC --> POD[FastAPI pods]
-  POD -->|Workload Identity| GCS[(GCS bucket)]
-```
+## Prerequisites
 
-## Repository layout
-
-```
-*.tf                      # Root module: wires the modules below (backend in versions.tf)
-terraform.tfvars          # The single environment: floci-gcp
-modules/                  # network, gke, iam, storage, artifact-registry, project-services
-app/                      # Python FastAPI service + tests + sample data
-helm/keygroup-api/        # Helm chart: app, nginx, Prometheus, Grafana, logging agent
-.github/workflows/ci.yml  # Lint, unit tests, make floci-up
-docker-compose.floci.yml  # floci-gcp emulator
-```
-
-Run `make help` for every command.
-
----
-
-## Deploy (one command)
-
-[floci-gcp](https://github.com/floci-io) emulates the GCP APIs in a container. The same Terraform and Helm used for real GCP run against it. No GCP account is needed.
-
-### Installing floci
-
-floci-gcp is a Docker image (`floci/floci-gcp`, about 260MB), not something you install on your machine. `make floci-up` starts it with `docker compose -f docker-compose.floci.yml`, which pulls the image the first time. All you need is the tools that drive it:
+Docker (running), Terraform ≥ 1.5, kubectl and Helm 3.
 
 ```bash
-# macOS (Homebrew)
-brew install --cask docker          # Docker Desktop, then start it
-brew install terraform kubectl helm
-
-# Optional: pull the emulator image ahead of time
-docker pull floci/floci-gcp:latest
+brew install --cask docker && brew install terraform kubectl helm
 ```
 
-| Tool | Version | Used for |
-|------|---------|----------|
-| Docker | running daemon | floci-gcp, plus the k3s container it creates for the GKE cluster |
-| Terraform | ≥ 1.5 | Creating the GCP resources on floci |
-| kubectl | any recent | Talking to the emulated GKE cluster |
-| Helm | 3.x | Deploying the app, nginx and observability stack |
-| curl, `file`, python3 | preinstalled on macOS / Ubuntu | Seeding data, smoke tests, `make floci-logs` |
+floci itself is a Docker image (`floci/floci-gcp`), and it's pulled automatically.
 
-On Linux, install Docker Engine plus the same three tools from your package manager or their official install pages. CI's Ubuntu runners already have everything but Terraform.
-
-**Optional: the floci CLI.** It isn't needed for this repo, but it's handy for poking at the emulator:
+## Run
 
 ```bash
-brew install floci-io/floci/floci
-floci gcp status      # health and version of the running emulator
-floci gcp services    # which GCP APIs are emulated
-floci gcp logs        # emulator logs
+make up           # ~2 min first run: emulator → terraform apply → seed data → build → helm deploy
 ```
-
-Don't use `floci gcp start` / `stop` here. `make floci-up` / `make floci-down` manage the container, its volume and the k3s cluster together, and the CLI would start a separate container.
-
-**Check it's working:**
 
 ```bash
-make floci-start                                  # start just the emulator
-curl -s 'http://localhost:4588/storage/v1/b?project=floci-local'   # responds with JSON
-```
+make k8s-port-forward    # keep running, then in another terminal:
 
-### Run it
+curl http://localhost:8080/v1/users/user-1/files/profile.json   # the API
+open http://localhost:3000                                       # Grafana SLO dashboard (no login)
+open http://localhost:8081                                       # nginx welcome page
+```
 
 ```bash
-make floci-up
+make smoke-test         # check the app, nginx, Grafana and Prometheus
+make load-test          # 100 req/s for 2 min, watch it in Grafana
+make slo-check          # fails unless both SLOs are >= 99.99%
+make test               # unit tests (no cluster needed)
+make integration-test   # app + real GCS client against floci
+make down               # tear everything down
 ```
 
-That runs, in order:
+`make help` lists every command.
 
-| Step | Target | What happens |
-|------|--------|--------------|
-| 1 | `floci-start` | `docker compose up` the emulator; create the `floci-tfstate` bucket for Terraform state |
-| 2 | `floci-infra` | `terraform init` + `terraform apply` (`terraform.tfvars` is auto-loaded) |
-| 3 | `floci-seed` | Upload `app/sample-data/users/**` to the customer-files bucket |
-| 4 | `floci-kubeconfig` | floci-gcp runs the GKE cluster as a k3s container; write `.floci/kubeconfig` for it |
-| 5 | `floci-deploy` | Build the image, import it into k3s, `helm upgrade --install` (app + nginx) |
-| 6 | `floci-test` | Call the app and nginx from inside the cluster |
+### Grafana
 
-Each target can also be run on its own, and running `make floci-up` again is safe.
+1. Run `make k8s-port-forward` and leave it running.
+2. Open **http://localhost:3000**. There's no login, and it opens on the **Keygroup API SLOs** dashboard (also under Dashboards → Keygroup).
+3. In another terminal, run `make load-test`. The dashboard refreshes every 5s and stays mostly empty until there's traffic.
 
-```bash
-make k8s-port-forward        # app → :8080, nginx → :8081
+The dashboard shows the success rate and % of responses within 300ms against the 99.99% targets, the error budget left for each, requests per second by status code, and latency percentiles (p50/p99/p99.9) with the 300ms line.
 
-curl http://localhost:8080/v1/users/user-1/files/profile.json
-open http://localhost:8081
+**Page won't load?** Check that the port-forward is still running, that the stack is up (`make up`), and that nothing else is using port 3000 (`lsof -i :3000`).
 
-make floci-down              # remove emulator, cluster, state
-```
+## What's in it
 
-**How the emulator is wired:**
-- `terraform.tfvars` sets `emulator_endpoint`, which makes the google provider in `versions.tf` send every API call to floci-gcp. Leave it empty to run the same code against real GCP.
-- Terraform state lives in the emulator's own GCS (the `gcs` backend in `versions.tf`), so `floci-down` wipes it with everything else.
-- floci-gcp doesn't emulate Artifact Registry or Cloud Router, so `terraform.tfvars` sets `enable_artifact_registry = false` and `enable_nat = false`.
-- Pods reach the emulator through a `floci-gcp` hostAlias (`flociIP`), with `STORAGE_EMULATOR_HOST=http://floci-gcp:4588` set in `helm/keygroup-api/templates/app.yaml`.
-- To use kubectl/helm directly: `export KUBECONFIG=$PWD/.floci/kubeconfig`.
+| Part | What it does |
+|------|--------------|
+| **Terraform** (`terraform/`) | VPC and subnet, a private regional GKE cluster with Workload Identity and Shielded Nodes, least-privilege service accounts, a locked-down versioned GCS bucket, Artifact Registry. On floci the state is stored in the emulator's GCS. |
+| **Service** (`app/`) | `GET /v1/users/{id}/files/{file}` reads from GCS. Strict ID validation blocks path traversal. It exposes `/metrics` for Prometheus and writes one JSON log line per request. |
+| **Helm** (`helm/keygroup-api/`) | The app (non-root, read-only filesystem, health probes), nginx, Prometheus and Grafana with a pre-built SLO dashboard. |
+| **CI** (`.github/workflows/ci.yml`) | A staged pipeline on every push, with no cloud credentials: lint and unit tests → deploy prod → smoke test → integration tests → load test → SLO gate. Each stage is one `make` target, and there's a marked place to add more test stages. |
 
----
+**SLOs** are 99.99% success and 99.99% of responses within 300ms. The latency histogram has a bucket at exactly 0.3s, so "within 300ms" is an exact count rather than an estimate. A 12,000-request load test gives **100% success and 99.992% within 300ms (p99.99 231ms)**, so `make slo-check` passes. Each pod caches hot files for 30s (`CACHE_TTL_SECONDS`), which hides storage latency spikes; without it the run reached only 99.85%, because floci's storage emulator stalls for ~1s about once per 1,000 calls. The load test reads one file, so it measures the cache-hit path.
 
-## Observability & SLOs
+## How it runs on floci
 
-Requirements: **99.99% success rate** and **99.99% of responses within 300ms**.
+- `terraform/terraform.tfvars` sets `emulator_endpoint`, which points the Google provider at floci. Leave it empty and the same code targets real GCP.
+- floci doesn't emulate Cloud NAT or Artifact Registry, so both are switched off in `terraform.tfvars`.
+- floci runs the GKE cluster as a k3s container. The Makefile pulls its kubeconfig and imports the app image directly, with no registry.
+- Pods reach floci's storage API through a `floci-gcp` host alias (`STORAGE_EMULATOR_HOST`).
 
-```bash
-make k8s-port-forward    # Grafana → http://localhost:3000 (no login), Prometheus → :9090
-make floci-load          # 100 req/s for 2m = 12,000 requests (LOAD_QPS / LOAD_DURATION to change)
-make floci-logs          # latest app request logs from Cloud Logging on floci
-```
+## Assumptions and trade-offs
 
-| Piece | What it does | On real GKE |
-|-------|--------------|-------------|
-| App `/metrics` | `http_requests_total{status}` and the `http_request_duration_seconds` histogram (with a 0.3s bucket, so "within 300ms" is an exact count) | same |
-| Prometheus | Scrapes pods annotated `prometheus.io/scrape` every 5s | Google Managed Prometheus (enabled in `modules/gke`) |
-| Grafana | "Keygroup API SLOs" dashboard: success rate, % within 300ms, error budgets, latency percentiles | Grafana or Cloud Monitoring |
-| App stdout | One JSON line per request (`severity`, `status`, `latency_ms`) | same |
-| `logging-agent` (Vector DaemonSet) | Ships every container's stdout/stderr to Cloud Logging on floci as `logs/stdout\|stderr`, resource `k8s_container` | GKE's built-in logging agent |
+- **Cloud Storage, not the brief's Compute Disk.** Persistent Disk is zonal and can only be mounted read-write by one pod, so it can't serve 6,000 req/s across zones. Cloud Storage scales reads, versions objects, and can hand out signed URLs for large files.
+- **One environment: prod.** It runs on floci, with resources named `kg-prod-*` in project `keygroup-prod`. To move it to real GCP, clear `emulator_endpoint`, set a real project, and point the backend at a real GCS bucket. Extra environments would each get their own tfvars and state prefix.
+- **One uvicorn worker per pod.** This keeps the Prometheus counters accurate; you scale by adding replicas.
+- **What's built vs planned.** The diagram marks built items with ✓. Planned pieces (auth, caching, Cloud SQL metadata, Pub/Sub upload processing, tracing) are listed in docs/NEXT_STEPS.txt.
 
-Measuring 99.99% needs at least 10,000 requests; below that a single failure already breaks it.
+## Next steps
 
-### Load testing (`make floci-load`)
-
-`make floci-load` runs one command. It starts a temporary [fortio](https://fortio.org) pod inside the cluster, which sends steady traffic to the app and prints the results:
-
-```bash
-kubectl -n keygroup run loadtest --rm -i --restart=Never --image=fortio/fortio:1.75.3 -- \
-  load -qps 100 -t 2m -c 8 -p "50,99,99.9,99.99" \
-  http://keygroup-api/v1/users/user-1/files/profile.json
-```
-
-| Part | Meaning |
-|------|---------|
-| `kubectl run loadtest --rm -i --restart=Never` | Run a one-off pod, stream its output, delete it when done |
-| `-qps 100` | 100 requests per second, at a steady rate (`LOAD_QPS`, 0 = as fast as possible) |
-| `-t 2m` | For 2 minutes, i.e. 12,000 requests (`LOAD_DURATION`) |
-| `-c 8` | 8 parallel connections |
-| `-p "50,99,99.9,99.99"` | Latency percentiles to report; p99.99 is the latency SLO |
-| `http://keygroup-api/...` | The app's Service, by its in-cluster name |
-
-It runs inside the cluster so the numbers measure the app, not a `kubectl port-forward` tunnel from your laptop.
-
-```
-fortio pod ──100 req/s──▶ keygroup-api Service ──▶ app pod ──▶ floci GCS (fetch file)
-                                                      │
-                      ┌───────────────────────────────┴──────────────────────┐
-           /metrics (counter + histogram)                     one JSON log line per request
-                      │                                                      │
-           Prometheus scrapes every 5s                       logging agent (Vector)
-                      │                                                      │
-           Grafana dashboard                                 Cloud Logging on floci
-```
-
-**Reading the results:**
-- **fortio output (client side):** `Code 200 : 12000 (100.0 %)` is the success rate, and `# target 99.99% 0.2309` is the p99.99 latency in seconds, which must be under `0.3`.
-- **Grafana (server side):** the same traffic as the app recorded it, a little faster because it excludes the in-cluster network hop.
-
-**Variations:**
-
-```bash
-make floci-load LOAD_QPS=200 LOAD_DURATION=5m     # longer run, 60,000 requests
-make floci-load LOAD_QPS=0 LOAD_DURATION=30s      # max throughput of one pod
-
-# More pods (Prometheus finds them automatically; the next make floci-up resets to 1)
-KUBECONFIG=.floci/kubeconfig kubectl -n keygroup scale deploy/keygroup-api --replicas=3
-make floci-load LOAD_QPS=500
-```
-
-To change the URL or concurrency, run the `kubectl run` command above directly with your own values.
-
----
-
-## CI
-
-`.github/workflows/ci.yml` runs on every PR and push to `main`. It needs no GCP account or secrets:
-
-1. `make lint`: `terraform fmt -check`, `terraform validate`, `helm lint`
-2. Unit tests (`pytest`)
-3. `make floci-up` on the runner (the full terraform + helm deploy and smoke test), then `make floci-down`
-
----
-
-## Running the app without Kubernetes
-
-```bash
-cd app
-python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-LOCAL_STORAGE_PATH=./sample-data .venv/bin/uvicorn file_service.main:app --app-dir src --port 8080
-curl http://localhost:8080/v1/users/user-1/files/profile.json
-
-make test
-```
-
-## Environment variables
-
-| Variable | Purpose | Value on the cluster |
-|----------|---------|----------------------|
-| `GCS_BUCKET` | Bucket holding `users/<id>/files/<file>` | Terraform output `customer_files_bucket` |
-| `STORAGE_EMULATOR_HOST` | Point the GCS SDK at an emulator | `http://floci-gcp:4588` |
-| `LOCAL_STORAGE_PATH` | Serve from local disk instead of GCS | unset |
-| `APP_ENV` | Environment label | `floci` |
-| `LOG_LEVEL` | Log verbosity | `DEBUG` |
-
-## Design decisions
-
-| Aspect | Choice | Why |
-|---|---|---|
-| Framework | FastAPI | Fast, async, auto-docs, built-in validation |
-| Storage | GCS (local FS for dev) | Testable offline, production-ready |
-| Auth | None (internal) | Consumed by other services; edge handles auth |
-| Deploy | Helm | Single chart, env-specific values |
-| Local GCP | floci-gcp | Runs the real Terraform + Helm locally, including a GKE cluster |
-
-## Stretch (not implemented)
-
-- API keys / mTLS at edge
-- Prometheus metrics + SLO alerts
-- Signed URLs for large files
-- Ingress + managed TLS certs
-- External Secrets / Secret Manager integration
+See [docs/NEXT_STEPS.txt](docs/NEXT_STEPS.txt) for what I'd add and the tools I'd use: auth, latency SLO improvements, more test stages, security hardening, tracing and alerting, and moving prod to real GCP.
